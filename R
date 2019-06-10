@@ -1,2 +1,0 @@
-MuMoC_workflow.R: source code
-MuMoC_fun.R: function file
