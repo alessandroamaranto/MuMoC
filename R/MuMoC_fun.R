@@ -205,10 +205,10 @@ add_river <- function(x, s , e) {
   
   e <- as.character(e)
   switch(e,
-         'FALSE' = {x <- normalize(x, s);
-         }, 'TRUE' = {warning('river not found');},
+         'TRUE' = {warning('river not found');
+         }, 'FALSE' = {x <- normalize(x, s); return(x)},
          stop("specify case"))
-  return(x)
+  
   
 }
 
@@ -246,6 +246,56 @@ select_columns <- function(ts, x, c) {
   y <- x[ , c(c - ts + 1, Nvar)]
   return(y)
   
+}
+
+ann_return <- function(x_c, f, m, ns) {
+  
+  library(RSNNS)
+  library(hydroGOF)
+  
+  Nvar <- ncol(x_c)
+  x_c <- as.data.frame(x_c)
+  Y <- x_c[ ,Nvar]
+  X <- x_c[,-Nvar]
+  
+  cf <- f[[m]]
+  
+  YY <- Y[cf]
+  XX <- X[cf, ]
+  
+  #New Calibration
+  Y <- Y[-cf]
+  X <- X[-cf, ]
+  
+  Nnodes <- seq(3, 13, 2)
+  it <- seq(300, 700, 200)
+  
+  n1 <- length(Nnodes)
+  n2 <- length(it)
+  dummy_nse <- -Inf
+  
+  for (p in 1:n1) {
+    for (w in 1:n2) {
+      set.seed(42)
+      ANN <- mlp(X, Y, maxit = Nnodes[p], 
+                 size = it[w],
+                 initFunc = "Randomize_Weights",
+                 hiddenActFunc="Act_Logistic",
+                 learnFunc = "Rprop",
+                 outputActFunc = "Act_Logistic",
+                 inputsTest = XX,
+                 targetsTest = YY)
+      
+      out <- predict(ANN, XX)
+      err <- NSE(out[, 1], YY)
+      
+      if (err > dummy_nse) {
+        model <- ANN
+        dummy_nse <- err
+      }
+    }
+  }
+  return(model)
 }
 
 input_variable_selection <- function(cand, xc, xv, e, Fl, rc, rv, j, selection) {
@@ -409,7 +459,6 @@ ann_err <- function(cand, xc, xv, e, Fl, rc, rv, j, Vs) {
       }
     }
     return(model)
-    
   }
   
   ptime = system.time ({
@@ -487,7 +536,7 @@ exhaustive_pareto_search <- function(b, X, s, e_v) {
   
   
   for (k in 1:Nh) {
-    print(k)
+    
     # Select bad models
     bh <- b[[k]]
     sb <- s[bh, 5:4]; Nb <- nrow(sb)
@@ -531,22 +580,27 @@ exhaustive_pareto_search <- function(b, X, s, e_v) {
                      by = "Date", all = T)
         
         # Extract only common dates
-        idx2 <- which(xnj$Date %in% x$Date)
+        idx2 <- which(xnj[ ,1] %in% x[ ,1])
         xnj <- xnj[idx2, ]
         
         # Compute Obj2
-        J2[j] <- abs(ccf(xn[ ,2],
+        J2[j] <- abs(ccf(xnj[ ,2],
                          xnj[ ,3],
                          na.action = na.pass,
                          lag.max = 0,
                          plot = F)$acf)
         
-        J3[j] <- length(which(is.na(xnj$Wlt_0.y)) )
+        J3[j] <- length(
+          which(
+            is.na(xnj[ ,3])) )
       }
       
       # Removes row with NA
       J2[which(is.na(J2))] = 0
-      J <- data.frame(NSE = J1, Corr = J2, Na = J3, Wid = idx)
+      J <- data.frame(NSE = J1,
+                      Corr = J2,
+                      Na = J3,
+                      Wid = idx)
       rm_idx <- which(J[ ,3] == 0)
       J <- J[-rm_idx, ]
       
@@ -562,7 +616,7 @@ exhaustive_pareto_search <- function(b, X, s, e_v) {
       if (nrow(P) < 5) {
         P <- psel(Jc, high(NSE) * high(Corr),
                   top = min(5, length(which(Jc[ ,4] != 0)))
-                  )
+        )
       }
       Pw[[i]] <- P
     }
@@ -572,7 +626,220 @@ exhaustive_pareto_search <- function(b, X, s, e_v) {
   return(Pf)
 }
 
-NeighTrainTest <- function(x, y, z, flag) {
+prepare_MuMoC_input <- function(b, eps_v, Pf, Vs, riv_idx, X, split, e, flow, c) {
+  
+  Nt <- length(b)
+  Xc <- list()
+  Xv <- list()
+  
+  for (k in 1:Nt) {
+    bi <- b[[k]]
+    
+    Xic <- list()
+    Xiv <- list()
+    
+    Nb <- length(bi)
+    
+    for (i in 1:Nb) {
+      
+      print(paste0(k, "-", i))
+      idx <- Pf[[k]][[i]][ ,4]
+      
+      if (sum(idx) != 0){
+        
+        # Select neighbouring wells from the list, as well as their ivs results
+        NN <- X[idx] #neigh.list
+        NNX <- Vs[idx, ] #n.iv
+        Q_idx <- riv_idx[idx, ] #discharge.index
+        
+        # Trick the code in case of single neighbour
+        if (is.vector(Q_idx)) {
+          
+          # Initialize fake matrix
+          temp <- matrix(nrow = 1, ncol = 2)
+          temp[1, 1] <- Q_idx[1] 
+          temp[1, 2] <- Q_idx[2]
+          
+          # Transform vector to matrix
+          Q_idx <- temp
+        }
+        
+        # Select dates for split
+        Ds <- as.data.frame(split[bi[i]  ])[, 1]
+        S1 <- data.frame(Date = Ds)
+        S2 <- split[[bi[i]]][ ,2]
+        
+        # Select well data
+        wn <- X[[bi[i]]]
+        r <- list()
+        
+        # Check for river
+        for (w in 1:length(NN)) {
+          r[[w]] <- river_coupling(X[[w]], flow[[Q_idx[w, 1]]], exc[w]) 
+        }
+        
+        # Divide train and test set
+        w_dummy <- list(wn)
+        
+        # Return them
+        Z <- mapply(neighbour_data_split,
+                    NN,
+                    S1,
+                    w_dummy,
+                    SIMPLIFY = F) 
+        
+        X_c <- list()
+        X_v <- list()
+        
+        for (u in 1:length(NN)) {
+          X_v[[u]] <- Z[[i]][[2]]
+          X_c[[u]] <- Z[[i]][[1]]
+        }
+        
+        d1 <- c(dim(X_c[[1]])[1],
+                length(X_c))
+        
+        d2 <- c(dim(X_v[[1]])[1],
+                length(X_v))
+        
+        T_n <- matrix(NA, d1[1], d1[2] + 2 )
+        Te_n <- matrix(NA, d2[1], d2[2] + 2 )
+        
+        folds <- createFolds(X_c[[1]][ ,ncol(X_c[[1]])],
+                             10, list = T)
+        
+        # Couple with river (if necessary), and select only usefull columns
+        for (w in 1:length(X_c)) {
+          
+          Nc <- ncol(X_c[[w]])
+          idx_c <- c(c - k + 1, Nc)
+          a <- X_c[[w]][ ,idx_c]
+          b <- X_v[[w]][ ,idx_c]
+          
+          # Train the best Neural Network
+          ns.idx <- Vs[i, k]
+          cls <- as.numeric(cand[[ns.idx]])
+          
+          nc <- ncol(a)
+          # Select training and test set
+          xc <- a[ ,c(cls, (nc-3):nc)]
+          xv <- b[ ,c(cls, (nc-3):nc)]
+          
+          Rc <- add_river(r[[w]][,-1],
+                          split[[i]][, 2],
+                          exc[w])
+          
+          
+          if(!is.character(Rc)){
+            Rv <- Rc[[2]]
+            Rc <- Rc[[1]]
+          }
+          
+          ma <- apply(xc, 2, max)
+          mi <- apply(xc, 2, min)
+          
+          for (q in 1:ncol(train)) {
+            xc[, q] <- 
+              (xc[, q] - mi[q]) / (ma[q] - mi[q])
+            xv[, q] <-
+              (xv[, q] - mi[q]) / (ma[q] - mi[q])
+          }
+          
+          ann_return <- function(x_c, f, m, ns) {
+            
+            library(RSNNS)
+            library(hydroGOF)
+            
+            Nvar <- ncol(x_c)
+            x_c <- as.data.frame(x_c)
+            Y <- x_c[ ,Nvar]
+            X <- x_c[,-Nvar]
+            
+            cf <- f[[m]]
+            
+            YY <- Y[cf]
+            XX <- X[cf, ]
+            
+            #New Calibration
+            Y <- Y[-cf]
+            X <- X[-cf, ]
+            
+            Nnodes <- seq(3, 13, 2)
+            it <- seq(300, 700, 200)
+            
+            n1 <- length(Nnodes)
+            n2 <- length(it)
+            dummy_nse <- -Inf
+            
+            for (p in 1:n1) {
+              for (w in 1:n2) {
+                set.seed(42)
+                ANN <- mlp(X, Y, maxit = Nnodes[p], 
+                           size = it[w],
+                           initFunc = "Randomize_Weights",
+                           hiddenActFunc="Act_Logistic",
+                           learnFunc = "Rprop",
+                           outputActFunc = "Act_Logistic",
+                           inputsTest = XX,
+                           targetsTest = YY)
+                
+                out <- predict(ANN, XX)
+                err <- NSE(out[, 1], YY)
+                
+                if (err > dummy_nse) {
+                  model <- ANN
+                  dummy_nse <- err
+                }
+              }
+            }
+            return(model)
+          }
+          
+          # Run the models
+          ptime = system.time ({
+            ann.nw <- foreach(m = 1:10) %dopar%  ann_return(xc, folds, m, -100)
+          })
+          
+          T_n[ ,w] <- 
+            return_ensemble_mean(ann.nw,
+                                 xc,
+                                 xv)[[1]]
+          
+          Te_n[ ,w] <- 
+            return_ensemble_mean(ann.nw,
+                                 xc,
+                                 xv)[[2]]
+        } 
+        
+        Xn <- normalize(wn[ ,-1], S2)
+        Xnv <- Xn[[2]]; Xn <- Xn[[1]]
+        
+        cor.idx <- acf(wn[ ,ncol(wn)],
+                       lag.max = 6,
+                       plot = F)$acf
+        cor.idx[1:k] <- 0
+        cor.idx <- which.max(cor.idx) - 1
+        
+        Nc <- ncol(T_n)
+        Ncs <- ncol(Xn)
+        
+        T_n[ ,(Nc-1):Nc] <- Xn[ ,c(Ncs-cor.idx, Ncs)]
+        Te_n[ ,(Nc-1):Nc] <- Xnv[ ,c( Ncs-cor.idx, Ncs)]
+        
+        Xc[[i]] <- T_n
+        Xv[[i]] <- Te_n
+      }else{
+        Xic[[i]] <- NULL
+        Xiv[[i]] <- NULL
+      }
+    }
+    Xc[[k]] <- Xic
+    Xv[[k]] <- Xiv
+  } 
+  return(list(Xc, Xv))
+}
+
+neighbour_data_split <- function(x, y, z) {
   
   
   # Split train and test set for neighbouring wells
@@ -588,11 +855,29 @@ NeighTrainTest <- function(x, y, z, flag) {
   # Compute test set for neighbouring well-
   test <-  test.temp[which(test.temp[ ,1] %in% test.bad[ ,1]), ]
   
-  if (flag == 1) {
-    return(train)
-  }else {
-    return(test)
+  return(list(train, test))
+}
+
+return_ensemble_mean <- function(model, xc, xv) {
+  
+  Nm <- length(model)
+  
+  x <- matrix(NA, nrow(xc), 10)
+  z <- matrix(NA, nrow(xv), 10)
+  
+  for (m in 1:Nm) {
+    mod <- model[[m]]
+    
+    x[ ,m] <- predict(mod,
+                      xc[ ,-ncol(xc)])
+    
+    z[ ,m] <- predict(mod,
+                      xv[ ,-ncol(xv)])
   }
+  
+  x <- apply(x, 2, mean)
+  z <- apply(z, 2, mean)
+  return(list(x, z))
 }
 
 MCReturn <- function(x, y, flag) {
@@ -711,4 +996,3 @@ MCReturn <- function(x, y, flag) {
   return(SelModel)
   
 }
-
