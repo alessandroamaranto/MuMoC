@@ -880,7 +880,106 @@ return_ensemble_mean <- function(model, xc, xv) {
   return(list(x, z))
 }
 
-MCReturn <- function(x, y, flag) {
+return_ibl_error <- function(Xck, Xvk) {
+  
+  eps_mat <- matrix(NA, length(Xck), 6)
+  Nw <- length(Xck)
+  
+  for (i in 1:Nw) {
+    
+    Xci <- Xck[[i]]
+    Xvi <- Xvk[[i]]
+    
+    if (!is.null(Xci)) {
+      
+      Nc <- ncol(Xci)
+      folds <- createFolds(Xci[ ,Nc], k = 10)
+      
+      ann_return <- function(x_c, f, m, ns) {
+        
+        library(RSNNS)
+        library(hydroGOF)
+        
+        Nvar <- ncol(x_c)
+        x_c <- as.data.frame(x_c)
+        Y <- x_c[ ,Nvar]
+        X <- x_c[,-Nvar]
+        
+        cf <- f[[m]]
+        
+        YY <- Y[cf]
+        XX <- X[cf, ]
+        
+        #New Calibration
+        Y <- Y[-cf]
+        X <- X[-cf, ]
+        
+        Nnodes <- seq(3, 13, 2)
+        it <- seq(300, 700, 200)
+        
+        n1 <- length(Nnodes)
+        n2 <- length(it)
+        dummy_nse <- -Inf
+        
+        for (p in 1:n1) {
+          for (w in 1:n2) {
+            set.seed(42)
+            ANN <- mlp(X, Y, maxit = Nnodes[p], 
+                       size = it[w],
+                       initFunc = "Randomize_Weights",
+                       hiddenActFunc="Act_Logistic",
+                       learnFunc = "Rprop",
+                       outputActFunc = "Act_Logistic",
+                       inputsTest = XX,
+                       targetsTest = YY)
+            
+            out <- predict(ANN, XX)
+            err <- NSE(out[, 1], YY)
+            
+            if (err > dummy_nse) {
+              model <- ANN
+              dummy_nse <- err
+            }
+          }
+        }
+        return(model)
+      }
+      
+      ptime = system.time ({
+        ann.comb <- foreach(m = 1:10) %dopar%  ann_return(Xci, folds, m, -100)
+      })
+      
+      eps_mat[i, 1] <- ens_average(ann.comb, Xvi)
+      
+      # M5 Tree
+      M5 <- multi_models(Xci, Xvi, 1)
+      r <- predict(M5,
+                   Xvi[ ,-Nc])
+      
+      eps_mat[i, 2] <- NSE(r,
+                           Xvi[ ,Nc])
+      
+      # Knn
+      Knn <- multi_models(Xci, Xvi, 2)
+      eps_mat[i, 3] <- NSE(Knn$pred,
+                           Xbi[ ,Nc])
+      
+      #Lwr
+      Lwr <- multi_models(Xci, Xvi, 3)
+      r <- predict(Lwr, Xvi[ ,-Nc])
+      eps_mat[i, 4] <- NSE(r, Xvi[ ,Nc])
+      
+      #Wknn
+      Wknn <- multi_models(Xci, Xvi, 4)
+      r <- predict(Wknn, Xvi[ ,-Nc])
+      eps_mat[i, 5] <- NSE(r, Xvi[ ,Xvi])
+    }
+  }
+  
+  return(eps_mat)
+}
+
+multi_models <- function(x, y, flag) {
   
   if (flag == 1) {
     

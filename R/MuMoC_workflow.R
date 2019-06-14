@@ -83,77 +83,25 @@ eps_state <- table_3(eps_v, s, 'Data_in/USA.shp')
 b <- apply(eps_v, 2, function(x) which(x < 0.6))
 Pf <- exhaustive_pareto_search(b, X, s, eps_v)
 
-# Prepare data for models combination-------------------------------
-
-MuMoC_in <- prepare_MuMoC_input(b, eps_v, Pf, Vs, riv_idx, X, split, e, flow, c)
-ibl.train <- MuMoC_in[[1]]
-ibl.test <- MuMoC_in[[2]]
-
 # Models combination-------------------------------
-res.tot <- list()
 
-# Iterate along lead times
-for (k in 1:n.steps) {
-  print(k)
+# Prepare data for models combination
+MuMoC_in <- prepare_MuMoC_input(b, eps_v, Pf, Vs, riv_idx, X, split, exc, flow, c)
+Xc <- MuMoC_in[[1]]; Xv <- MuMoC_in[[2]]
+eps_MuMoC <- list()
+
+# Run the combination
+for (k in 1:Nh) {
   
-  # Select training and test set for ALL wells in the lead time
-  train.lt <- ibl.train[[k]]
-  test.lt <- ibl.test[[k]]
+  Xck <- Xc[[k]]
+  Xvk <- Xv[[k]]
   
-  results <- matrix(nrow = length(train.lt), ncol = 6)
-  for (i in 1:length(train.lt)) {
-    
-    # Select ith bad train-test
-    train <- train.lt[[i]]
-    test <- test.lt[[i]]
-    
-    if (!is.null(train)) {
-      
-      
-      # Create the folds
-      folds <- createFolds(train[ ,ncol(train)], k = 10)
-      
-      # Train Ann
-      ptime = system.time ({
-        ann.comb <- foreach(m = 1:10) %dopar%  ann_return(train, folds, m, -100)
-      })
-    
-      test.for <- matrix(nrow = nrow(test), ncol = 10)
-      
-      # Forcast
-      for (m in 1:length(ann.nw)) {
-        test.for[ ,m] <- predict(ann.comb[[m]], test[ ,-ncol(test)])
-      }
-      
-      test.for <- apply(as.data.frame(test.for), 1, mean)
-      results[i, 1] <- NSE(test.for, test[ ,ncol(test)])
-      
-      # M5 Tree
-      M5 <- MCReturn(train, test, 1)
-      M5res <- predict(M5, test[ ,-ncol(test)])
-      results[i, 2] <- NSE(M5res, test[ ,ncol(test)])
-      
-      # Knn
-      Knn <- MCReturn(train, test, 2)
-      results[i, 3] <- NSE(Knn$pred, test[ ,ncol(test)])
-      
-      #Lwr
-      Lwr <- MCReturn(train, test, 3)
-      LwRes <- predict(Lwr, test[ ,-ncol(test)])
-      results[i, 4] <- NSE(LwRes, test[ ,ncol(test)])
-      
-      #Wknn
-      Wknn <- MCReturn(train, test, 4)
-      WkRes <- predict(Wknn, test[ ,-ncol(test)])
-      results[i, 5] <- NSE(WkRes, test[ ,ncol(test)])
-    }
-  }
-  
-  results[ ,6] <- res.nse[which(res.nse[ ,k] < 0.6), k]
-  res.tot[[k]] <- results 
+  eps0 <- return_IBL_error(Xck, Xvk)  
+  eps0[ ,6] <- eps_v[b[[k]], k]
+  eps_MuMoC[[k]] <- eps0 
 }
 
-# Plot models improvements as function of Obj------------------
+# Plot the results------------------
 
 # Allocate memory for plot database
 ssel <- list()
@@ -181,7 +129,7 @@ for (k in 1:4) {
     sel[i, ] <- as.numeric(c(par[which.min(d), c(1, 2)], res.tot[[k]][i ,3], res.tot[[k]][i ,3] - res.tot[[k]][i ,6]))
   }
   
-  # Delete nr 28 or 38 (what went wrong?)
+  
   if(k == 3){
     ssel[[k]] <- as.data.frame(sel[-28, ] )
   }else if(k == 4){
@@ -280,7 +228,7 @@ for (k in 1:4) {
     sel[i, ] <- as.numeric(c(par[which.min(d), c(1, 2)], res.tot[[k]][i ,3], res.tot[[k]][i ,3] - res.tot[[k]][i ,6]))
   }
   
-  # Delete nr 28 or 38 (what went wrong?)
+  
   if(k == 3){
     ssel.2[[k]] <- as.data.frame(sel[-28, ] )
   }else if(k == 4){
