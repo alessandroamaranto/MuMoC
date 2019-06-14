@@ -20,11 +20,11 @@ library(foreach)
 library(doParallel)
 library(rPref)
 library(ggplot2)
-library(geosphere)
+
 
 ## Import data
 load('Data_in/MuMoC_in.RData')
-load('Data_in/candid.RData')
+load('Data_in/candidate.RData')
 
 # load column index and river-excluded text files
 c <- scan("Data_in/column_index.txt", numeric())
@@ -43,7 +43,7 @@ flow_c <- h <- list()
 N <- length(X); Nh <- 4
 Vs <- d_eps <- eps_v <- matrix(0, N, Nh)
 
-# ANN routine
+# ANN routine (warning: combined with IVS might take several days)
 
 for (i in 1:N) {
   
@@ -54,8 +54,10 @@ for (i in 1:N) {
   Xc <- Xc[[1]]
   
   XRc <- add_river(flow_c[[i]][,-1], split[[i]][, 2], exc[i])
-  XRv <- XRc[[2]]
-  XRc <- XRc[[1]]
+  if(!is.character(XRc)){
+    XRv <- XRc[[2]]
+    XRc <- XRc[[1]]
+  }
   
   Xc <- attach_date(X[[i]], Xc, split[[i]][, 2], 'calibration')
   Xv <- attach_date(X[[i]], Xv, split[[i]][, 2], 'validation')
@@ -70,7 +72,7 @@ for (i in 1:N) {
     Vs[i, j] <- Ir[[1]]
     d_eps[i, j] <- Ir[[2]]
     
-    eps_v[i, j] <- ann_run(cand, xc, xv, e, Fl, XRc, XRv, j, Vs[i, j])     
+    eps_v[i, j] <- ann_err(cand, xc, xv, e, Fl, XRc, XRv, j, Vs[i, j])     
   }
 }
 
@@ -83,169 +85,9 @@ Pf <- exhaustive_pareto_search(b, X, s, eps_v)
 
 # Prepare data for models combination-------------------------------
 
-ibl.train <- list()
-ibl.test <- list()
-ns.ivs <- ivs.ls
-ns.ivs <- ns.ivs[-skip[1:8]]
-
-for (k in 1:n.steps) {
-  
-  # Select the bad models and the code for the neighbours
-  bad.models <- which(res.nse[ ,k] < 0.6)
-  
-  train.well <- list()
-  test.well <- list()
-  
-  for (i in 1:length(bad.models)) {
-    
-    print(paste0(k, "-", i))
-    neigh.code <- pareto.lt[[k]][[i]]$Wid
-    
-    if (sum(neigh.code) != 0){
-      
-      # Select neighbouring wells from the list, as well as their ivs results
-      neigh.list <- ivs.eff[neigh.code]
-      n.iv <- ns.ivs[neigh.code]
-      discharge.index <- riv.gw[neigh.code, ]
-      
-      # Trick the code in case of single neighbour
-      if (is.vector(discharge.index)) {
-        
-        # Initialize fake matrix
-        discharge.temp <- matrix(nrow = 1, ncol = 2)
-        discharge.temp[1, 1] <- discharge.index[1] 
-        discharge.temp[1, 2] <- discharge.index[2]
-        
-        # Transform vector to matrix
-        discharge.index <- discharge.temp
-      }
-      
-      # Select dates for split
-      split.neigh <- data.frame(Date = as.data.frame(split.eff[  bad.models[i]  ])[, 1])
-      split<- split.eff[[bad.models[i]]][ ,2]
-      
-      # Select well data
-      well <- ivs.eff[[bad.models[i]]]
-      river.input <- list()
-      
-      # Check for river
-      for (w in 1:length(neigh.list)) {
-        # Check if there is a river
-        if(discharge.index[w ,2] < 30){
-          river <- Q[[discharge.index[w, 1]]]
-          river.input[[w]] <- RiverCoupling(neigh.list[[w]], river)
-        }else{
-          river.input[[w]] <- NULL
-        }
-      }
-      
-      # Divide train and test set
-      well.fake <- list(well)
-      
-      # Return them
-      train.neigh <- mapply(NeighTrainTest, neigh.list, split.neigh, well.fake, 1, SIMPLIFY = F) 
-      test.neigh <- mapply(NeighTrainTest, neigh.list, split.neigh, well.fake, 2, SIMPLIFY = F) 
-      
-      # Allocate memory for train and test set
-      tr.w <- matrix(nrow = nrow(train.neigh[[1]]), ncol = length(train.neigh) + 2 )
-      te.w <- matrix(nrow = nrow(test.neigh[[1]]), ncol = length(test.neigh) + 2 )
-      
-      # Create fold
-      folds <- createFolds(train.neigh[[1]][ ,ncol(train.neigh[[1]])], 10, list = T)
-      # Couple with river (if necessary), and select only usefull columns
-      for (w in 1:length(train.neigh)) {
-        
-        # Select time steps columns
-        t1 <- train.neigh[[w]][ , c(c.s - k + 1, ncol(train.neigh[[w]]))]
-        t2 <- test.neigh[[w]][ , c(c.s - k + 1, ncol(test.neigh[[w]]))]
-        
-        # Train the best Neural Network
-        ns.idx <- which.max(n.iv[[w]][ ,k])
-        columns <- as.numeric(cand[[ns.idx]])
-        
-        # Select training and test set
-        train <- t1[ ,c(columns, (ncol(t1)-3):ncol(t2))]
-        test <- t2[ ,c(columns, (ncol(t2)-3):ncol(t2))]
-        
-        # Check if there is a river
-        if(discharge.index[w ,2] < 30){
-          
-          train.riv <- NeighTrainTest(river.input[[w]], split.neigh$Date, well, 1)
-          test.riv <- NeighTrainTest(river.input[[w]], split.neigh$Date, well, 2)
-          
-          # Combine with river data
-          train <- data.frame(Q = train.riv[ ,ncol(train.riv)-k], train)
-          test <- data.frame(Q = test.riv[ ,ncol(test.riv)-k], test)
-        }
-        
-        max.par <- apply(train, 2, max)
-        min.par <- apply(train, 2, min)
-        
-        for (q in 1:ncol(train)) {
-          train[ ,q] <- (train[ ,q] - min.par[q])/(max.par[q] - min.par[q])
-          test[ ,q] <- (test[ ,q] - min.par[q])/(max.par[q] - min.par[q])
-        }
-        
-        # Run the models
-        ptime = system.time ({
-          ann.nw <- foreach(m = 1:10) %dopar%  ModelsReturn(train, folds, m, -100)
-        })
-        
-        test.for <- matrix(nrow = nrow(test), ncol = 10)
-        train.for <- matrix(nrow = nrow(train), ncol = 10)
-        
-        # Forcast
-        for (m in 1:length(ann.nw)) {
-          train.for[ ,m] <- predict(ann.nw[[m]], train[ ,-ncol(train)])
-          #train.for[folds[[m]] ,1] <- predict(ann.nw[[m]], train[[w]][folds[[m]] ,-ncol(train[[w]])])
-          test.for[ ,m] <- predict(ann.nw[[m]], test[ ,-ncol(test)])
-        }
-        
-        # Average training and testing column
-        train.for <- apply(as.data.frame(train.for), 1, mean)
-        test.for <- apply(as.data.frame(test.for), 1, mean)
-        
-        # Assign wth column to training and testing set
-        tr.w[ ,w] <- train.for
-        te.w[ ,w] <- test.for
-      }
-      
-      # Convert to dataframe
-      tr.w <- as.data.frame(tr.w)
-      te.w <- as.data.frame(te.w)
-      
-      # Split data for bad well
-      cal.val <- Norm(well[ ,-1], split)
-      
-      # Select max correlation lag
-      cor.idx <- acf(well$Wlt_0, lag.max = 6, plot = F)$acf
-      cor.idx[1:k] <- 0
-      cor.idx <- which.max(cor.idx) - 1
-      
-      # Add columns
-      tr.w[ ,(ncol(tr.w)-1):ncol(tr.w)] <- cal.val[[1]][ ,c( ncol(cal.val[[1]]) - cor.idx,    ncol(cal.val[[1]])   )]
-      te.w[ ,(ncol(te.w)-1):ncol(te.w)] <- cal.val[[2]][ ,c( ncol(cal.val[[2]]) - cor.idx,    ncol(cal.val[[2]])   )]
-      
-      # Write to file
-      write.table(tr.w, paste0("Train//TrainBM", i, "LT", k, ".txt")   )
-      write.table(tr.w, paste0("Test//TestBM", i, "LT", k, ".txt")   )
-      
-      # Save train and test set for well
-      train.well[[i]] <- tr.w
-      test.well[[i]] <- te.w
-    }else{
-      
-      # No action if there is no pareto neighbour
-      train.well[[i]] <- NULL
-      test.well[[i]] <- NULL
-    }
-  }
-  
-  # Save all data for lead time
-  ibl.train[[k]] <- train.well
-  ibl.test[[k]] <- test.well
-}
-
+MuMoC_in <- prepare_MuMoC_input(b, eps_v, Pf, Vs, riv_idx, X, split, e, flow, c)
+ibl.train <- MuMoC_in[[1]]
+ibl.test <- MuMoC_in[[2]]
 
 # Models combination-------------------------------
 res.tot <- list()
@@ -273,11 +115,9 @@ for (k in 1:n.steps) {
       
       # Train Ann
       ptime = system.time ({
-        ann.comb <- foreach(m = 1:10) %dopar%  ModelsReturn(train, folds, m, -100)
+        ann.comb <- foreach(m = 1:10) %dopar%  ann_return(train, folds, m, -100)
       })
-      
-      
-      
+    
       test.for <- matrix(nrow = nrow(test), ncol = 10)
       
       # Forcast
